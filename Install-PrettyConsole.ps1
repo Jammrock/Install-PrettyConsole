@@ -22,8 +22,9 @@ $fontName = "CaskaydiaCove NF"
 $fontFile = "CascadiaCode.zip"
 
 # list of packages that will be installed or upgrades with winget. Must be exact match, as --exact is used with all winget calls.
-# PowerShell and Terminal must be the last two packages, in that order, to prevent errors.
-[string[]]$Packages = "JanDeDobbeleer.OhMyPosh", "Microsoft.PowerShell", "Microsoft.WindowsTerminal"
+# PowerShell and Terminal are separated out into a second stage since they can cause errors if performed too early.
+[string[]]$PackagesStage1 = "JanDeDobbeleer.OhMyPosh"
+[string[]]$PackagesStage2 = "Microsoft.PowerShell", "Microsoft.WindowsTerminal"
 
 # list of commands to add to the PowerShell profile
 [string[]]$profileLines = 'Import-Module -Name Terminal-Icons',
@@ -41,6 +42,10 @@ $fontFile = "CascadiaCode.zip"
 
 # get rid of annoying copy/paste prompts
 [bool]$devilGetBehindMe = $true
+
+
+# disable progress bar since it's sticking in the AppX install.
+$ProgressPreference = "SilentlyContinue"
 
 
 ## FUNCTIONS ##
@@ -190,39 +195,85 @@ function Install-WGPackage
     foreach ($pack in $Package)
     {
         # is the package installed already?
-        $fndPack = winget list $pack --exact | Where-Object { $_ -match $pack}
-        Write-Verbose "Package: $fndPack"
+
+        Write-Verbose "Install-WGPackage - Looking for package: $pack"
+        # look for an existing package and it's version
+        try 
+        {
+            $null = Import-Module -Name Appx -EA Stop
+        }
+        catch 
+        {
+            $null = Import-Module -Name Appx -UseWIndowsPowershell -EA SilentlyContinue    
+        }
+
+        $appxPack = Get-AppxPackage -Name $pack -EA SilentlyContinue
+
+        if ($appxPack)
+        {
+            # use appx version
+            [version]$packVer = $appxPack.Version
+        }
+        else 
+        {
+            # use winget
+            $fndPack = winget list $pack --exact | Where-Object { $_ -match $pack}
+
+            # get the installed version
+            if ($fndPack)
+            {
+                [version]$packVer = ($fndPack -replace "\s+"," ").Trim(" ").Split(" ")[-1]
+            }
+        }
 
         # check for updates when found
-        if ($fndPack)
+        if ($packVer)
         {
-            Write-Verbose "Looking for newer version."
-            # get the installed version
-            [version]$packVer = ($fndPack -replace "\s+"," ").Trim(" ").Split(" ")[-1]
-            Write-Verbose "Installed: $($packVer.ToString())"
+            Write-Verbose "Install-WGPackage - Package found. Looking for newer version."
+            Write-Verbose "Install-WGPackage - Installed: $($packVer.ToString())"
 
             # get newest version
             [version]$newVer = winget search $pack --exact | Where-Object { $_ -match $pack } | ForEach-Object { $_.trim(" ").split(" ")[-1] }
-            Write-Verbose "Available: $($newVer.ToString())"
+            Write-Verbose "Install-WGPackage - Available: $($newVer.ToString())"
 
             if ($newVer -gt $packVer)
             {
-                if ($pack -match "WindowsTerminal")
-                {
-                    Write-Host -Foreground Yellow "`n`n`The terminal may close once Windows Terminal is upgraded. This is expected. Please re-run the script to continue.`n`nPlease run Windows Terminal with PowerShell, not Windows PowerShell, to ensure the correct profile is used.`n`n"
-                }
-                Write-Verbose "Upgrading $pack"
+                Write-Verbose "Install-WGPackage - Upgrading $pack"
                 winget upgrade $pack --exact
             }
         }
         # install if not
         else
         {
-            Write-Verbose "Installing $pack"
+            Write-Verbose "Install-WGPackage - Installing $pack"
             winget install $pack --exact
+        }
+
+        Start-Sleep 3
+    }
+}
+
+function Import-AppxModule
+{
+    # is the AppX module loaded?
+    $appxModFnd = Get-Module AppX -EA SilentlyContinue
+
+    if (-NOT $appxModFnd)
+    {
+        try 
+        {
+            $null = Import-Module -Name Appx -EA Stop
+        }
+        catch 
+        {
+            $OrgWarn = $WarningPreference
+            $WarningPreference = "SilentlyContinue"
+            Import-Module -Name Appx -UseWIndowsPowershell -EA SilentlyContinue *> $null
+            $WarningPreference = $OrgWarn
         }
     }
 }
+
 
 #endregion FUNCTIONS
 
@@ -231,28 +282,24 @@ function Install-WGPackage
 ## MAIN ##
 
 # make sure the path is there
+Write-Verbose "Create install path."
 $null = mkdir "$Path" -Force -EA SilentlyContinue
 
 # requires winget (installed by default on Win11 and newer Win10)
+Write-Verbose "Looking for winget."
 $fndWinget = Get-Command winget -EA SilentlyContinue
 
 if ( -NOT $fndWinget )
 {
+    Write-Verbose "winget not found. Trying to install."
+
     # try to install it
     $wgRelease = Find-GitReleaseLatest 'microsoft/winget-cli'
     $wgURL = $wgRelease.URL | Where-Object { $_ -match "msixbundle" }
     $wgFile = Get-WebFile -URI $wgURL -savePath $Path -fileName "AppInstaller.msixbundle"
 
     # install App Installer
-    try 
-    {
-        $null = Import-Module -Name Appx -EA Stop    
-    }
-    catch 
-    {
-        $null = Import-Module -Name Appx -UseWIndowsPowershell -EA SilentlyContinue    
-    }
-
+    Import-AppxModule
     Add-AppxPackage -Path $wgFile
 
     $fndWinget = Get-Command winget -EA SilentlyContinue
@@ -266,6 +313,7 @@ if ( -NOT $fndWinget )
 # get CaskaydiaCove NF if not installed
 if ($fontName -notin (Get-InstalledFonts))
 {
+    Write-Verbose "Installing $fontName"
     # get newest font
     $ccnf = Find-GitReleaseLatest -repo $repoCCNF    
 
@@ -293,14 +341,41 @@ if ($fontName -notin (Get-InstalledFonts))
 }
 
 # install/upgrade winget packages
-Install-WGPackage $Packages -Verbose
+Install-WGPackage $PackagesStage1
 
 # install terminal icons
+$nugetVer = Get-PackageProvider -ListAvailable -EA SilentlyContinue | Where-Object Name -match "NuGet" | ForEach-Object { $_.Version }
+[version]$minNugetVer = "2.8.5.208"
+if ($nugetVer -lt $minNugetVer -or $null -eq $nugetVer)
+{
+    Write-Verbose "Installing NuGet update."
+    $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.208 -Force
+}
+
 Install-Module -Name Terminal-Icons -Repository PSGallery -Force
 
 # edit profile with default Terminal Icons and posh profile
 $profileLines | Out-File $PROFILE -Force -NoClobber -Append
 
+
+# if Windows Terminal is installed, proceed.
+# if not we need to install it or the settings.json file won't exist
+$wtFnd = Get-Command wt -EA SilentlyContinue
+
+if ( -NOT $wtFnd)
+{
+    Write-Verbose "Installing Windows Terminal."
+    Install-WGPackage "Microsoft.WindowsTerminal"
+}
+
+# make sure PowerShell 7 is install or some of the settings won't work
+$pwshFnd = Get-Command pwsh -EA SilentlyContinue
+
+if ( -NOT $pwshFnd)
+{
+    Write-Verbose "Installing PowerShell."
+    Install-WGPackage "Microsoft.PowerShell"
+}
 
 # edit the WT settings file so it uses new font
 $wtPackNames = "Microsoft.WindowsTerminal", "Microsoft.WindowsTerminalPreview"
@@ -309,20 +384,15 @@ $wtPackNames = "Microsoft.WindowsTerminal", "Microsoft.WindowsTerminalPreview"
 {
     # continue if installed
     # at a minimum, the normal WT will be installed but Preview may not
+    Import-AppxModule
+
     $appxPack = Get-AppxPackage -Name $wt -EA SilentlyContinue
 
     #  command may fail when using PowerShell [Core], so try alternate method
     if (-NOT $appxPack)
     {
-        $null = Import-Module -Name Appx -UseWIndowsPowershell -EA SilentlyContinue
-
-        $appxPack = Get-AppxPackage -Name $wt -EA SilentlyContinue
-
-        if (-NOT $appxPack)
-        {
-            Write-Warning "Failed to find the Windows Terminal path. Please manually set the font in WT to '$fontName'."
-            break wt
-        }
+        Write-Warning "Failed to find the Windows Terminal path. Please manually configure $wt."
+        break wt
     }
 
     # assume WT is installed at this point
@@ -331,6 +401,15 @@ $wtPackNames = "Microsoft.WindowsTerminal", "Microsoft.WindowsTerminalPreview"
     # export settings.json
     # clean up comment lines to prevent issues with older JSON parsers (looking at you Windows PowerShell)
     $wtJSON =  Get-Content "$wtAppData\settings.json" | Where-Object { $_ -notmatch "^.*//.*$" -and $_ -ne "" -and $_ -ne $null} | ConvertFrom-Json
+
+    $pwshWTFnd = $wtJSON.profiles.list | Where-Object { $_.Name -eq "PowerShell" }
+
+    if (-NOT $pwshWTFnd)
+    {
+        Write-Host -ForegroundColor Red -BackgroundColor Black "`n`n`nFailed to find PowerShell 7 in Windows Terminal settings. Please rerun the script from the PowerShell profile, not Windows PowerShell, in Windows Terminal.`n`n`n"
+        Start-Sleep 5
+        break wt
+    }
 
     if ($wtFontPwshOnly)
     {
@@ -387,5 +466,11 @@ $wtPackNames = "Microsoft.WindowsTerminal", "Microsoft.WindowsTerminalPreview"
     $wtJSON | ConvertTo-Json -Depth 20 | Out-File "$wtAppData\settings.json" -Force -Encoding utf8
 }
 
+# check for updates to pwsh and WT, if not done earlier
+if ($wtFnd)
+{
+    Write-Host -ForegroundColor Yellow "`n`nThe console may close after completing the final operation. This is expected.`n`n"    
+    Install-WGPackage $PackagesStage2
+}
 
 Write-Host -ForegroundColor Green "Please restart the console/terminal. Some changes will not take effect until after the restart."
