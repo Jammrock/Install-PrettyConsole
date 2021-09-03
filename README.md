@@ -17,7 +17,7 @@ https://www.hanselman.com/blog/my-ultimate-powershell-prompt-with-oh-my-posh-and
 
 ```PowerShell
 $null = mkdir C:\Temp -Force
-curl https://git.io/JExjW -OutFile C:\temp\Install-PrettyConsole.ps1
+iwr 'https://git.io/JExjW' -OutFile C:\temp\Install-PrettyConsole.ps1
 ```
 
 4. Execute the script.
